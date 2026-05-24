@@ -1,21 +1,20 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { PHASES, type FormRow, type MessageRow, type Phase } from "@/lib/db";
+import {
+  PHASES,
+  PHASE_LABEL_SHORT,
+  type FormRow,
+  type MessageRow,
+} from "@/lib/db";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createClient } from "@/lib/supabase/server";
 import { cn } from "@/lib/utils";
 import { notFound } from "next/navigation";
 import { closeForm, regenerateAccessCode } from "../actions";
 import { CopyLinkButton } from "./copy-link-button";
 
-const PHASE_LABEL: Record<Phase, string> = {
-  context: "Context",
-  workflow: "Workflow",
-  pain: "Pain",
-  data: "Data",
-  wrapup: "Wrap-up",
-};
-
 interface ToolCall {
+  id?: string;
   type: "function";
   function: { name: string; arguments: string };
 }
@@ -28,6 +27,12 @@ export default async function FormDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
   const admin = createAdminClient();
 
   const { data: formData } = await admin
@@ -38,12 +43,17 @@ export default async function FormDetailPage({
   if (!formData) notFound();
   const form = formData as FormRow;
 
+  // Owner gate. Treat foreign forms as not-found (don't leak existence /
+  // access_code via different error messages).
+  if (form.owner_id && form.owner_id !== user!.id) notFound();
+
   const { data: msgRows } = await admin
     .from("messages")
     .select("*")
     .eq("form_id", id)
     .is("deleted_at", null)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .range(0, 499);
   const messages = (msgRows ?? []) as MessageRow[];
 
   return (
@@ -72,7 +82,7 @@ export default async function FormDetailPage({
           <code className="font-mono text-lg tracking-[0.3em]">
             {form.access_code}
           </code>
-          <form action={regenerateForm.bind(null, form.id)}>
+          <form action={regenerateAccessCode.bind(null, form.id)}>
             <Button type="submit" variant="outline" size="sm">
               重新產生
             </Button>
@@ -95,7 +105,7 @@ export default async function FormDetailPage({
                 p === form.current_phase ? "" : "text-muted-foreground",
               )}
             >
-              {PHASE_LABEL[p]}
+              {PHASE_LABEL_SHORT[p]}
             </Badge>
           ))}
         </div>
@@ -127,11 +137,6 @@ export default async function FormDetailPage({
   );
 }
 
-async function regenerateForm(formId: string) {
-  "use server";
-  await regenerateAccessCode(formId);
-}
-
 function TranscriptItem({ message }: { message: MessageRow }) {
   const isUser = message.role === "user";
   const toolCalls = (message.tool_calls as ToolCall[] | null) ?? [];
@@ -141,7 +146,12 @@ function TranscriptItem({ message }: { message: MessageRow }) {
         <span className="font-semibold uppercase">{message.role}</span>
         {message.phase && (
           <Badge variant="outline" className="text-[10px]">
-            {PHASE_LABEL[message.phase]}
+            {PHASE_LABEL_SHORT[message.phase]}
+          </Badge>
+        )}
+        {message.incomplete && (
+          <Badge variant="outline" className="text-[10px]">
+            incomplete
           </Badge>
         )}
         <span>
@@ -167,7 +177,13 @@ function TranscriptItem({ message }: { message: MessageRow }) {
             let args: Record<string, unknown> = {};
             try {
               args = JSON.parse(tc.function.arguments);
-            } catch {}
+            } catch (e) {
+              console.error("[transcript] bad tool_call arguments", {
+                messageId: message.id,
+                tool: tc.function.name,
+                err: e,
+              });
+            }
             return (
               <div key={i}>
                 <span className="font-mono">→ {tc.function.name}</span>

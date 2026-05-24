@@ -3,21 +3,21 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { PHASES, type FormRow, type MessageRow, type Phase } from "@/lib/db";
+import {
+  PHASES,
+  PHASE_LABEL_SHORT,
+  type FormRow,
+  type MessageRow,
+  type Phase,
+} from "@/lib/db";
 import { cn } from "@/lib/utils";
 import { Pencil } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 type UIMessage = Pick<MessageRow, "id" | "role" | "content" | "phase"> & {
   streaming?: boolean;
-};
-
-const PHASE_LABEL: Record<Phase, string> = {
-  context: "Context",
-  workflow: "Workflow",
-  pain: "Pain",
-  data: "Data",
-  wrapup: "Wrap-up",
+  incomplete?: boolean;
 };
 
 type FormHead = Pick<
@@ -31,13 +31,37 @@ type FormHead = Pick<
   | "status"
 >;
 
+type StreamEvent =
+  | { type: "text"; delta: string }
+  | { type: "phase"; to: Phase }
+  | { type: "completed" }
+  | { type: "done" }
+  | { type: "error"; code?: string; message?: string };
+
+const ERROR_MESSAGES: Record<string, string> = {
+  unauthorized: "登入逾時，請重新輸入通行碼",
+  "form-completed": "這份表單已結束",
+  "content-too-long": "訊息太長，請縮短",
+  "chat-rate-limited": "送得太快了，稍後再試",
+  "phase-changed": "對話階段已被其他視窗變更，重新載入中…",
+  "upstream-error": "AI 暫時忙線，稍後再試",
+  "db-error": "系統錯誤，稍後再試",
+  "stream-error": "連線中斷，稍後再試",
+};
+
 export function Chat({
   form,
   initialMessages,
+  shouldSeed,
 }: {
   form: FormHead;
-  initialMessages: Pick<MessageRow, "id" | "role" | "content" | "phase" | "created_at">[];
+  initialMessages: Pick<
+    MessageRow,
+    "id" | "role" | "content" | "phase" | "incomplete" | "created_at"
+  >[];
+  shouldSeed: boolean;
 }) {
+  const router = useRouter();
   const [messages, setMessages] = useState<UIMessage[]>(
     initialMessages
       .filter((m) => m.role !== "system")
@@ -46,6 +70,7 @@ export function Chat({
         role: m.role,
         content: m.content,
         phase: m.phase,
+        incomplete: m.incomplete,
       })),
   );
   const [phase, setPhase] = useState<Phase>(form.current_phase);
@@ -58,7 +83,8 @@ export function Chat({
   const [isComposing, setIsComposing] = useState(false);
   const compositionEndedAt = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const initFired = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const didInit = useRef(false);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -68,13 +94,29 @@ export function Chat({
   }, [messages]);
 
   useEffect(() => {
-    if (initFired.current) return;
-    if (messages.length === 0 && status === "open") {
-      initFired.current = true;
+    if (didInit.current) return;
+    if (shouldSeed) {
+      didInit.current = true;
       void runChat(null);
     }
+    return () => {
+      // Component unmount → cancel any in-flight stream.
+      abortRef.current?.abort();
+    };
+    // shouldSeed is a one-shot trigger from the server snapshot; the ref
+    // guards against StrictMode double-fire, so the effect intentionally
+    // depends only on shouldSeed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [shouldSeed]);
+
+  function showError(code: string | undefined, fallback: string) {
+    if (code === "phase-changed") {
+      // State drift — pull a fresh server snapshot.
+      router.refresh();
+      return;
+    }
+    setError((code && ERROR_MESSAGES[code]) ?? fallback);
+  }
 
   async function runChat(userContent: string | null) {
     setStreaming(true);
@@ -95,19 +137,30 @@ export function Chat({
     const placeholderId = `streaming-${Date.now()}`;
     setMessages((m) => [
       ...m,
-      { id: placeholderId, role: "assistant", content: "", phase, streaming: true },
+      {
+        id: placeholderId,
+        role: "assistant",
+        content: "",
+        phase,
+        streaming: true,
+      },
     ]);
+
+    const ac = new AbortController();
+    abortRef.current = ac;
 
     try {
       const res = await fetch(`/api/form/${form.id}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(userContent ? { content: userContent } : {}),
+        signal: ac.signal,
       });
 
       if (!res.ok || !res.body) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? `http-${res.status}`);
+        showError(body.error, `http-${res.status}`);
+        return;
       }
 
       const reader = res.body.getReader();
@@ -125,19 +178,14 @@ export function Chat({
           if (!line.startsWith("data:")) continue;
           const json = line.slice(5).trim();
           if (!json) continue;
-          let event: {
-            type: string;
-            delta?: string;
-            to?: Phase;
-            message?: string;
-          };
+          let event: StreamEvent;
           try {
-            event = JSON.parse(json);
+            event = JSON.parse(json) as StreamEvent;
           } catch {
             continue;
           }
 
-          if (event.type === "text" && event.delta) {
+          if (event.type === "text") {
             setMessages((m) =>
               m.map((x) =>
                 x.id === placeholderId
@@ -145,18 +193,20 @@ export function Chat({
                   : x,
               ),
             );
-          } else if (event.type === "phase" && event.to) {
+          } else if (event.type === "phase") {
             setPhase(event.to);
           } else if (event.type === "completed") {
             setStatus("completed");
           } else if (event.type === "error") {
-            setError(event.message ?? "stream error");
+            showError(event.code, event.message ?? "stream-error");
           }
         }
       }
     } catch (e) {
+      if (ac.signal.aborted) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      if (abortRef.current === ac) abortRef.current = null;
       setMessages((m) =>
         m.map((x) => (x.id === placeholderId ? { ...x, streaming: false } : x)),
       );
@@ -200,7 +250,8 @@ export function Chat({
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? `http-${res.status}`);
+        showError(body.error, `http-${res.status}`);
+        return;
       }
       const data = (await res.json()) as { phase: Phase };
       phaseFromServer = data.phase;
@@ -256,14 +307,20 @@ export function Chat({
                   p === phase ? "" : "text-muted-foreground",
                 )}
               >
-                {PHASE_LABEL[p]}
+                {PHASE_LABEL_SHORT[p]}
               </Badge>
             ))}
           </div>
         </div>
       </header>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto"
+        role="log"
+        aria-live="polite"
+        aria-busy={streaming}
+      >
         <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4">
           {messages.map((m) =>
             editingId === m.id ? (
@@ -290,8 +347,11 @@ export function Chat({
             ),
           )}
           {error && (
-            <div className="text-destructive border-destructive/30 bg-destructive/10 rounded-lg border p-3 text-sm">
-              出錯了：{error}
+            <div
+              role="alert"
+              className="text-destructive border-destructive/30 bg-destructive/10 rounded-lg border p-3 text-sm"
+            >
+              {error}
             </div>
           )}
         </div>
@@ -326,6 +386,7 @@ export function Chat({
                 placeholder="輸入回覆… (Enter 送出，Shift+Enter 換行)"
                 disabled={streaming || !!editingId}
                 className="resize-none"
+                aria-label="回覆內容"
               />
               <Button
                 type="submit"
@@ -362,8 +423,8 @@ function MessageBubble({
         <button
           type="button"
           onClick={onEdit}
-          className="text-muted-foreground hover:text-foreground self-center opacity-0 transition group-hover:opacity-100"
-          aria-label="編輯"
+          className="text-muted-foreground hover:text-foreground self-center opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100"
+          aria-label="編輯訊息並重新生成"
         >
           <Pencil className="size-3.5" />
         </button>
@@ -375,8 +436,14 @@ function MessageBubble({
             ? "bg-primary text-primary-foreground"
             : "bg-muted text-foreground",
         )}
+        aria-busy={message.streaming || undefined}
       >
         {message.content || (message.streaming ? "…" : "")}
+        {message.incomplete && (
+          <span className="text-muted-foreground mt-1 block text-[10px]">
+            （訊息中斷，請繼續對話）
+          </span>
+        )}
       </div>
     </div>
   );
@@ -401,6 +468,7 @@ function EditingBubble({
           onChange={(e) => onChange(e.target.value)}
           rows={3}
           autoFocus
+          aria-label="編輯訊息"
         />
         <div className="flex justify-end gap-2">
           <Button variant="ghost" size="sm" onClick={onCancel}>

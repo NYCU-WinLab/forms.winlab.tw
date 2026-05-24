@@ -8,6 +8,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { type FormRow } from "@/lib/db";
+import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import Link from "next/link";
 import { NewFormDialog } from "./new-form-dialog";
@@ -15,17 +16,26 @@ import { NewFormDialog } from "./new-form-dialog";
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
+  // Layout already gates auth + allowlist; we re-derive the caller here to
+  // scope the form list to forms this admin owns.
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
   const admin = createAdminClient();
   const { data, error } = await admin
     .from("forms")
     .select("*")
-    .order("updated_at", { ascending: false });
+    .eq("owner_id", user!.id)
+    .order("updated_at", { ascending: false })
+    .range(0, 199);
 
   if (error) {
     return (
       <div className="grid gap-2">
         <h1 className="text-xl font-semibold">Forms</h1>
-        <p className="text-destructive text-sm">讀取失敗：{error.message}</p>
+        <p className="text-destructive text-sm">讀取失敗，請稍後再試。</p>
       </div>
     );
   }
