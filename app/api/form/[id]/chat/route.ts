@@ -1,11 +1,17 @@
-import { MODEL, getOpenAI } from "@/lib/ai/client";
+import { MAX_COMPLETION_TOKENS, MODEL, getOpenAI } from "@/lib/ai/client";
 import { buildSystemPrompt } from "@/lib/ai/prompt";
 import {
-  type AdvancePhaseArgs,
-  type CompleteFormArgs,
+  parseAdvancePhaseArgs,
+  parseCompleteFormArgs,
   tools,
 } from "@/lib/ai/tools";
-import { type FormRow, type MessageRow, type Phase } from "@/lib/db";
+import {
+  type FormRow,
+  type MessageRow,
+  type Phase,
+  isValidAdvance,
+} from "@/lib/db";
+import { ErrorCode, errorJson, logServerError } from "@/lib/errors";
 import { cookieName, verifyGateToken } from "@/lib/form-gate";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type OpenAI from "openai";
@@ -14,19 +20,24 @@ import { type NextRequest } from "next/server";
 export const runtime = "nodejs";
 
 type ChatMessageParam = OpenAI.Chat.Completions.ChatCompletionMessageParam;
+type ChatTool = OpenAI.Chat.Completions.ChatCompletionMessageFunctionToolCall;
 
-function toOpenAIMessages(form: FormRow, rows: MessageRow[]): ChatMessageParam[] {
-  const out: ChatMessageParam[] = [
-    { role: "system", content: buildSystemPrompt(form) },
-  ];
-  for (const m of rows) {
-    if (m.role === "user") {
-      out.push({ role: "user", content: m.content });
-    } else if (m.role === "assistant") {
-      out.push({ role: "assistant", content: m.content || "" });
-    }
-  }
-  return out;
+// Keep last N raw messages; older context is already represented by
+// phase_summaries injected via the system prompt.
+const HISTORY_TAIL = 30;
+// Hard cap on a single user turn (chars). Anything beyond is rejected.
+const MAX_CONTENT = 4000;
+// Per-form chat rate-limit: user messages within window.
+const CHAT_WINDOW_SECONDS = 60;
+const CHAT_MAX_PER_WINDOW = 8;
+// Hard cap on messages we'll keep persisting per form (defensive — wrap-up
+// should happen well before this).
+const MESSAGES_HARD_CAP = 500;
+
+interface PersistRow {
+  result: "ok" | "not_found" | "form_completed" | "phase_changed";
+  current_phase: Phase | null;
+  status: "open" | "completed" | null;
 }
 
 export async function POST(
@@ -34,13 +45,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id: formId } = await params;
-
-  // Gate check
   const token = request.cookies.get(cookieName(formId))?.value;
-  if (!token || !(await verifyGateToken(token, formId))) {
-    return Response.json({ error: "unauthorized" }, { status: 401 });
-  }
-
   const admin = createAdminClient();
 
   const { data: formData, error: formErr } = await admin
@@ -48,21 +53,69 @@ export async function POST(
     .select("*")
     .eq("id", formId)
     .maybeSingle();
-  if (formErr) return Response.json({ error: formErr.message }, { status: 500 });
-  if (!formData) return Response.json({ error: "not-found" }, { status: 404 });
+  if (formErr) {
+    logServerError("chat.form_lookup", formErr, { formId });
+    return errorJson(ErrorCode.DbError, 500);
+  }
+  if (!formData) return errorJson(ErrorCode.NotFound, 404);
   const form = formData as FormRow;
-  if (form.status === "completed") {
-    return Response.json({ error: "form-completed" }, { status: 410 });
+
+  if (!token || !(await verifyGateToken(token, formId, form.access_code_version))) {
+    return errorJson(ErrorCode.Unauthorized, 401);
   }
 
-  // Optional user message
+  if (form.status === "completed") {
+    return errorJson(ErrorCode.FormCompleted, 410);
+  }
+
+  // Parse + validate user message.
   let body: { content?: string } = {};
   try {
     body = await request.json();
-  } catch {}
+  } catch {
+    // Empty body is allowed — used for the initial assistant greeting.
+  }
   const content = String(body.content ?? "").trim();
+  if (content.length > MAX_CONTENT) {
+    return errorJson(ErrorCode.ContentTooLong, 413, { max: MAX_CONTENT });
+  }
 
+  // Per-form rate-limit (covers the case where someone obtains a gate cookie
+  // and scripts the chat endpoint). Counts non-deleted user messages.
   if (content) {
+    const windowStart = new Date(
+      Date.now() - CHAT_WINDOW_SECONDS * 1000,
+    ).toISOString();
+    const { count: recent, error: rateErr } = await admin
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("form_id", formId)
+      .eq("role", "user")
+      .is("deleted_at", null)
+      .gte("created_at", windowStart);
+    if (rateErr) {
+      logServerError("chat.rate_check", rateErr, { formId });
+      return errorJson(ErrorCode.DbError, 500);
+    }
+    if ((recent ?? 0) >= CHAT_MAX_PER_WINDOW) {
+      return errorJson(ErrorCode.ChatRateLimited, 429, {
+        retry_after: CHAT_WINDOW_SECONDS,
+      });
+    }
+
+    const { count: total, error: capErr } = await admin
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("form_id", formId)
+      .is("deleted_at", null);
+    if (capErr) {
+      logServerError("chat.cap_check", capErr, { formId });
+      return errorJson(ErrorCode.DbError, 500);
+    }
+    if ((total ?? 0) >= MESSAGES_HARD_CAP) {
+      return errorJson(ErrorCode.ChatRateLimited, 429);
+    }
+
     const { error: insertErr } = await admin.from("messages").insert({
       form_id: formId,
       role: "user",
@@ -70,20 +123,28 @@ export async function POST(
       phase: form.current_phase,
     });
     if (insertErr) {
-      return Response.json({ error: insertErr.message }, { status: 500 });
+      logServerError("chat.user_insert", insertErr, { formId });
+      return errorJson(ErrorCode.DbError, 500);
     }
   }
 
-  // Reload messages
+  // Load tail of history; older messages are represented by phase_summaries.
+  // Use range() because Supabase JS defaults to a 1000-row cap that's easy
+  // to miss.
   const { data: msgRows, error: msgErr } = await admin
     .from("messages")
-    .select("*")
+    .select("id, role, content, phase, tool_calls, created_at")
     .eq("form_id", formId)
     .is("deleted_at", null)
-    .order("created_at", { ascending: true });
-  if (msgErr) return Response.json({ error: msgErr.message }, { status: 500 });
+    .order("created_at", { ascending: false })
+    .range(0, HISTORY_TAIL - 1);
+  if (msgErr) {
+    logServerError("chat.msg_lookup", msgErr, { formId });
+    return errorJson(ErrorCode.DbError, 500);
+  }
+  const recentMessages = ((msgRows ?? []) as MessageRow[]).reverse();
 
-  const openaiMessages = toOpenAIMessages(form, (msgRows ?? []) as MessageRow[]);
+  const openaiMessages = toOpenAIMessages(form, recentMessages);
 
   const openai = getOpenAI();
   const runner = openai.chat.completions.stream({
@@ -91,61 +152,137 @@ export async function POST(
     messages: openaiMessages,
     tools,
     tool_choice: "auto",
+    max_completion_tokens: MAX_COMPLETION_TOKENS,
+  });
+
+  // Accumulate content for partial-flush recovery if the run is aborted.
+  let contentBuf = "";
+  runner.on("content", (delta) => {
+    contentBuf += delta;
   });
 
   const encoder = new TextEncoder();
+  const expectedPhase = form.current_phase;
+
   const stream = new ReadableStream({
     async start(controller) {
+      let closed = false;
       const send = (event: unknown) => {
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
-        );
+        if (closed) return;
+        try {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+          );
+        } catch {
+          // Controller may already be closing — swallow.
+          closed = true;
+        }
+      };
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // Already closed.
+        }
       };
 
       runner.on("content", (delta) => send({ type: "text", delta }));
-      runner.on("error", (err) =>
-        send({ type: "error", message: String(err) }),
-      );
 
       try {
         const final = await runner.finalChatCompletion();
         const msg = final.choices[0]?.message;
-        const toolCalls = msg?.tool_calls ?? [];
+        const rawToolCalls = (msg?.tool_calls ?? []) as ReadonlyArray<{
+          type?: string;
+        }>;
+        const toolCalls: ChatTool[] = rawToolCalls.filter(
+          (tc): tc is ChatTool => tc.type === "function",
+        );
 
+        // Validate tool calls against the server-side transition machine.
         let newPhase: Phase = form.current_phase;
+        let summaryForOldPhase: string | null = null;
         let completed = false;
 
         for (const tc of toolCalls) {
-          if (tc.type !== "function") continue;
-          try {
-            if (tc.function.name === "advance_phase") {
-              const args = JSON.parse(tc.function.arguments) as AdvancePhaseArgs;
-              newPhase = args.to_phase;
-            } else if (tc.function.name === "complete_form") {
-              JSON.parse(tc.function.arguments) as CompleteFormArgs;
-              completed = true;
+          if (tc.function.name === "advance_phase") {
+            const args = parseAdvancePhaseArgs(tc.function.arguments);
+            if (!args) {
+              logServerError("chat.bad_advance_args", null, {
+                formId,
+                raw: tc.function.arguments,
+              });
+              continue;
             }
-          } catch {
-            // Bad JSON in tool args — skip silently, the run won't crash.
+            if (!isValidAdvance(form.current_phase, args.to_phase)) {
+              logServerError("chat.bad_advance_target", null, {
+                formId,
+                from: form.current_phase,
+                to: args.to_phase,
+              });
+              continue;
+            }
+            newPhase = args.to_phase;
+            summaryForOldPhase = args.checklist_summary;
+          } else if (tc.function.name === "complete_form") {
+            const args = parseCompleteFormArgs(tc.function.arguments);
+            if (!args) {
+              logServerError("chat.bad_complete_args", null, {
+                formId,
+                raw: tc.function.arguments,
+              });
+              continue;
+            }
+            if (form.current_phase !== "wrapup") {
+              logServerError("chat.complete_out_of_phase", null, {
+                formId,
+                phase: form.current_phase,
+              });
+              continue;
+            }
+            completed = true;
           }
         }
 
-        await admin.from("messages").insert({
-          form_id: formId,
-          role: "assistant",
-          content: msg?.content ?? "",
-          phase: form.current_phase,
-          tool_calls: toolCalls.length ? toolCalls : null,
+        // Persist assistant turn atomically with the phase advance under an
+        // advisory lock. If the phase changed since we read it (another tab),
+        // the RPC reports phase_changed and we surface that to the client.
+        const persistResult = await admin.rpc("chat_persist_turn", {
+          p_form_id: formId,
+          p_expected_phase: expectedPhase,
+          p_content: msg?.content ?? "",
+          p_phase: newPhase,
+          p_tool_calls: toolCalls.length ? (toolCalls as unknown as object) : null,
+          p_incomplete: false,
+          p_new_phase: newPhase !== form.current_phase ? newPhase : null,
+          p_summary_for_old_phase: summaryForOldPhase,
+          p_complete: completed,
         });
+        const persist = persistResult.data as PersistRow[] | null;
 
-        const updates: Record<string, unknown> = {};
-        if (newPhase !== form.current_phase) updates.current_phase = newPhase;
-        if (completed) {
-          updates.status = "completed";
-          updates.completed_at = new Date().toISOString();
+        if (persistResult.error || !persist || persist.length === 0) {
+          logServerError("chat.persist_rpc", persistResult.error, { formId });
+          send({ type: "error", code: ErrorCode.DbError });
+          close();
+          return;
         }
-        if (Object.keys(updates).length) {
-          await admin.from("forms").update(updates).eq("id", formId);
+
+        const row = persist[0]!;
+        if (row.result === "phase_changed") {
+          send({ type: "error", code: ErrorCode.PhaseChanged });
+          close();
+          return;
+        }
+        if (row.result === "form_completed") {
+          send({ type: "error", code: ErrorCode.FormCompleted });
+          close();
+          return;
+        }
+        if (row.result !== "ok") {
+          send({ type: "error", code: ErrorCode.DbError });
+          close();
+          return;
         }
 
         if (newPhase !== form.current_phase) {
@@ -153,10 +290,34 @@ export async function POST(
         }
         if (completed) send({ type: "completed" });
         send({ type: "done" });
-        controller.close();
+        close();
       } catch (e) {
-        send({ type: "error", message: String(e) });
-        controller.close();
+        // Common reject paths:
+        //   • User abort     — `runner.aborted` is true. Persist what we have.
+        //   • OpenAI 429/5xx — SDK already retried via maxRetries; surface friendly.
+        //   • Network blip   — persist partial, surface friendly.
+        const aborted = runner.aborted;
+        if (contentBuf.length > 0) {
+          const { error: partialErr } = await admin.rpc("chat_persist_turn", {
+            p_form_id: formId,
+            p_expected_phase: expectedPhase,
+            p_content: contentBuf,
+            p_phase: form.current_phase,
+            p_tool_calls: null,
+            p_incomplete: true,
+            p_new_phase: null,
+            p_summary_for_old_phase: null,
+            p_complete: false,
+          });
+          if (partialErr) {
+            logServerError("chat.partial_persist", partialErr, { formId });
+          }
+        }
+        if (!aborted) {
+          logServerError("chat.stream", e, { formId });
+          send({ type: "error", code: ErrorCode.UpstreamError });
+        }
+        close();
       }
     },
     cancel() {
@@ -169,6 +330,58 @@ export async function POST(
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      // Disable proxy buffering (Caddy / nginx) so SSE chunks reach the client
+      // as they're emitted.
+      "X-Accel-Buffering": "no",
     },
   });
+}
+
+function toOpenAIMessages(
+  form: FormRow,
+  rows: MessageRow[],
+): ChatMessageParam[] {
+  const { stable, dynamic } = buildSystemPrompt(form);
+  const out: ChatMessageParam[] = [
+    { role: "system", content: stable },
+    { role: "system", content: dynamic },
+  ];
+
+  for (const m of rows) {
+    if (m.role === "user") {
+      out.push({ role: "user", content: m.content });
+    } else if (m.role === "assistant") {
+      // Reconstruct assistant turns with their tool_calls so the model sees
+      // its own prior tool usage. Each tool_call must be followed by a `tool`
+      // role result message; we use a no-op stub since server has already
+      // applied the call's effect (phase advance / completion).
+      const toolCalls: ChatTool[] = Array.isArray(m.tool_calls)
+        ? (m.tool_calls as unknown[]).filter(
+            (tc): tc is ChatTool =>
+              typeof tc === "object" &&
+              tc !== null &&
+              (tc as { type?: unknown }).type === "function",
+          )
+        : [];
+
+      if (toolCalls.length > 0) {
+        out.push({
+          role: "assistant",
+          content: m.content || null,
+          tool_calls: toolCalls,
+        });
+        for (const tc of toolCalls) {
+          out.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: "applied",
+          });
+        }
+      } else if (m.content) {
+        out.push({ role: "assistant", content: m.content });
+      }
+    }
+  }
+
+  return out;
 }

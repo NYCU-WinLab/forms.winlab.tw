@@ -10,9 +10,28 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-export function Gate({ formId, department }: { formId: string; department: string }) {
+const ERROR_MESSAGES: Record<string, string> = {
+  "wrong-code": "通行碼錯了",
+  "bad-code-format": "通行碼是 6 碼數字",
+  "too-many-attempts": "嘗試太多次，稍後再試",
+  "form-locked": "這份表單嘗試過多已暫時鎖定，請聯絡承辦人",
+  "form-completed": "這份表單已結束",
+  "not-found": "找不到表單",
+  "db-error": "系統錯誤，稍後再試",
+  "invalid-body": "請求格式錯誤",
+};
+
+export function Gate({
+  formId,
+  department,
+}: {
+  formId: string;
+  department: string;
+}) {
+  const router = useRouter();
   const [code, setCode] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -28,22 +47,16 @@ export function Gate({ formId, department }: { formId: string; department: strin
         body: JSON.stringify({ code }),
       });
       if (res.ok) {
-        window.location.reload();
+        // Re-fetch the server component; the now-valid gate cookie will let
+        // the chat UI render.
+        router.refresh();
         return;
       }
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       const code_ = body.error ?? `error-${res.status}`;
-      setError(
-        {
-          "wrong-code": "通行碼錯了",
-          "bad-code-format": "通行碼是 6 碼數字",
-          "too-many-attempts": "嘗試太多次，稍後再試",
-          "form-completed": "這份表單已結束",
-          "not-found": "找不到表單",
-        }[code_] ?? code_,
-      );
+      setError(ERROR_MESSAGES[code_] ?? code_);
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setPending(false);
     }
@@ -71,7 +84,11 @@ export function Gate({ formId, department }: { formId: string; department: strin
                 className="text-center font-mono text-lg tracking-[0.4em]"
               />
             </div>
-            {error && <p className="text-destructive text-sm">{error}</p>}
+            {error && (
+              <p className="text-destructive text-sm" role="alert">
+                {error}
+              </p>
+            )}
             <Button type="submit" disabled={pending || code.length !== 6}>
               {pending ? "驗證中…" : "進入"}
             </Button>
