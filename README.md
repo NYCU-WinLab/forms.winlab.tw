@@ -1,36 +1,146 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+```
+███████╗ ██████╗ ██████╗ ███╗   ███╗███████╗
+██╔════╝██╔═══██╗██╔══██╗████╗ ████║██╔════╝
+█████╗  ██║   ██║██████╔╝██╔████╔██║███████╗
+██╔══╝  ██║   ██║██╔══██╗██║╚██╔╝██║╚════██║
+██║     ╚██████╔╝██║  ██║██║ ╚═╝ ██║███████║
+╚═╝      ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝
+```
+
+# forms.winlab.tw
+
+AI consultant that pre-interviews department reps so WinLab consultants walk into the kickoff meeting already knowing where to look.
+
+## What it does
+
+Enterprises want AI adoption help. WinLab consultants need to know each department's actual workflow + real pain points before they can find AI intervention points. Calendar-wise, a 30-min interview per department doesn't scale — and a Google Form gets generic answers.
+
+forms.winlab.tw runs a **phase-gated AI conversation** with each department rep, gathering the first 4 of WinLab's 10-step adoption SOP:
+
+| Phase    | What gets collected                                              |
+| -------- | ---------------------------------------------------------------- |
+| Context  | Department headcount, role in the org, weekly/monthly outputs    |
+| Workflow | At least 2 core workflows step-by-step, tools/systems/people     |
+| Pain     | At least 3 specific pain points (step + frequency + impact)      |
+| Data     | Data the dept produces/consumes, what's manually copy-pasted     |
+
+The AI asks one question at a time, follows up for specifics, and advances phases via tool calls. Transcript lands in the admin dashboard. Consultant takes it from there — phases 5-10 (Opportunity / Risk / Prio / Pilot / Eval / Rollout) stay in human hands.
+
+## Roles
+
+- **Admin** (WinLab consultants) — magic-link login at `/login`, creates forms in `/dashboard`, reviews transcripts.
+- **Department rep** — gets a link + 6-digit access code, no signup. Anonymous; admin only knows which department they spoke for.
+
+## Tech Stack
+
+- **Framework**: Next.js 16 (App Router, Turbopack)
+- **Runtime**: Bun
+- **UI**: Tailwind CSS v4 + shadcn/ui (Base UI)
+- **DB / Auth**: Supabase (Postgres + magic-link auth)
+- **LLM**: OpenAI GPT-5.5 via Chat Completions + tool calling
+- **Hosting**: Vercel
+
+## Architecture
+
+```
+/                           landing
+/login                      admin magic-link gate (email allowlist)
+/auth/callback              Supabase OAuth code exchange
+/dashboard                  admin form list + create modal
+/dashboard/[id]             admin transcript view + access-code controls
+
+/form/[id]                  rep entry — 6-digit gate → chat UI
+/api/form/[id]/verify       6-digit check + per-IP rate-limit + JWT cookie
+/api/form/[id]/chat         SSE streaming chat + tool-call phase tracking
+/api/form/[id]/edit         soft-delete + rewind phase on user-edited message
+```
+
+Two-layer auth — Supabase Auth for admin, a self-signed JWT cookie for rep gate. RLS is enabled on every table with **no policies**, so only the server-side service-role client can reach the data. Browser never talks to the DB directly.
+
+### Schema
+
+```sql
+forms             (id, organization, unit, department, department_brief,
+                   access_code, current_phase, status, timestamps)
+messages          (id, form_id, role, content, phase, tool_calls,
+                   created_at, deleted_at)        -- soft-delete for edit rerun
+verify_attempts   (id, form_id, ip, succeeded, created_at)  -- rate-limit
+```
+
+### AI loop
+
+System prompt injects `{organization, department, department_brief, current_phase}` + per-phase checklists. Each LLM call returns streamed text **and** optional tool calls:
+
+- `advance_phase(to_phase, checklist_summary)` — fires when the current phase's checklist is satisfied.
+- `complete_form(summary)` — fires after the wrap-up phase.
+
+Server processes tool calls during streaming, updates `forms.current_phase` / `forms.status`, persists assistant message + tool calls.
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
+bun install
 bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The dev server starts on `http://localhost:3000`. You'll need a Supabase project + an OpenAI key with GPT-5.5 access before anything actually works (see below).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Environment Variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Create `.env.local`:
 
-## Learn More
+```
+# Supabase
+NEXT_PUBLIC_SUPABASE_URL=https://<project>.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+SUPABASE_SECRET_KEY=sb_secret_...
 
-To learn more about Next.js, take a look at the following resources:
+# OpenAI
+OPENAI_API_KEY=sk-proj-...
+OPENAI_MODEL=gpt-5.5
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+# Admin email allowlist (comma-separated)
+ADMIN_EMAILS=you@winlab.tw
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+# Signs short-lived form gate cookies — `openssl rand -base64 32`
+FORM_GATE_SECRET=...
+```
 
-## Deploy on Vercel
+`SUPABASE_SECRET_KEY` is the new name for `service_role`. It's server-only — never expose to the browser.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Supabase Setup
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. Create a project at [supabase.com/dashboard](https://supabase.com/dashboard).
+2. Apply the schema in `supabase/migrations/20260524100000_initial.sql` (paste it into the SQL editor, or `supabase db push` if you've linked the CLI).
+3. **Authentication → URL Configuration**:
+   - Site URL: `http://localhost:3000` (dev) or `https://forms.winlab.tw` (prod)
+   - Redirect URLs allowlist: add `${SITE_URL}/auth/callback` for each env.
+4. Grab `Project URL`, `publishable_key`, `secret_key` from **Project Settings → API**.
+
+## Deploy
+
+```bash
+vercel link
+vercel env pull
+# fill in the env vars on Vercel for production
+vercel --prod
+```
+
+Production checklist:
+
+- Add the prod redirect URL to Supabase Auth → URL Configuration.
+- Bump `Site URL` accordingly (or keep dev + prod both in the allowlist).
+- Set all env vars in Vercel project settings — none with `NEXT_PUBLIC_` prefix should contain secrets.
+
+## Customization
+
+- **Prompt** — `lib/ai/prompt.ts`. Phase checklists and tone live here.
+- **Tools** — `lib/ai/tools.ts`. Phase-advance and form-complete schemas.
+- **Model** — `OPENAI_MODEL` env var.
+- **Allowlist** — `ADMIN_EMAILS` env var.
+- **Rate-limit** — `MAX_ATTEMPTS_PER_WINDOW` / `WINDOW_SECONDS` in `app/api/form/[id]/verify/route.ts`.
+- **Phase set** — schema check constraint + `lib/db.ts` `PHASES` array + prompt. Change in all three if you add/remove phases.
+
+## License
+
+[MIT](LICENSE.md) — because every consulting tool deserves to be forked, not gatekept.
