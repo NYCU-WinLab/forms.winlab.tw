@@ -2,36 +2,29 @@
 
 import { isAllowedAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
-import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
-export async function requestMagicLink(formData: FormData) {
+export async function signIn(formData: FormData) {
   const email = String(formData.get("email") ?? "")
     .trim()
     .toLowerCase();
-  if (!email) {
-    redirect("/login?error=missing-email");
+  const password = String(formData.get("password") ?? "");
+
+  // Single generic error for all failure modes — don't leak which emails
+  // exist, are in the allowlist, or have wrong passwords.
+  if (!email || !password) {
+    redirect("/login?error=invalid-credentials");
   }
+
   if (!isAllowedAdmin(email)) {
-    // Same redirect regardless of whether the email exists — don't expose the
-    // allowlist via timing or messaging.
-    redirect("/login?error=not-allowed");
+    redirect("/login?error=invalid-credentials");
   }
 
   const supabase = await createClient();
-  const hdr = await headers();
-  const origin = hdr.get("origin") ?? `https://${hdr.get("host")}`;
-
-  const { error } = await supabase.auth.signInWithOtp({
-    email,
-    options: {
-      emailRedirectTo: `${origin}/auth/callback?next=/dashboard`,
-      shouldCreateUser: true,
-    },
-  });
-
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) {
-    redirect(`/login?error=${encodeURIComponent(error.message)}`);
+    redirect("/login?error=invalid-credentials");
   }
-  redirect("/login?sent=1");
+
+  redirect("/dashboard");
 }
