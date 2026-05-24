@@ -28,7 +28,7 @@ The AI asks one question at a time, follows up for specifics, and advances phase
 
 ## Roles
 
-- **Admin** (WinLab consultants) — magic-link login at `/login`, creates forms in `/dashboard`, reviews transcripts.
+- **Admin** (WinLab consultants) — email + password login at `/login`, creates forms in `/dashboard`, reviews transcripts. Signups are disabled; admin users are provisioned manually via `bun scripts/provision-admin.ts`.
 - **Department rep** — gets a link + 6-digit access code, no signup. Anonymous; admin only knows which department they spoke for.
 
 ## Tech Stack
@@ -36,7 +36,7 @@ The AI asks one question at a time, follows up for specifics, and advances phase
 - **Framework**: Next.js 16 (App Router, Turbopack)
 - **Runtime**: Bun
 - **UI**: Tailwind CSS v4 + shadcn/ui (Base UI)
-- **DB / Auth**: Supabase (Postgres + magic-link auth)
+- **DB / Auth**: Supabase (Postgres + email/password auth)
 - **LLM**: OpenAI GPT-5.5 via Chat Completions + tool calling
 - **Hosting**: Vercel
 
@@ -44,8 +44,7 @@ The AI asks one question at a time, follows up for specifics, and advances phase
 
 ```
 /                           landing
-/login                      admin magic-link gate (email allowlist)
-/auth/callback              Supabase OAuth code exchange
+/login                      admin email + password gate (allowlist enforced)
 /dashboard                  admin form list + create modal
 /dashboard/[id]             admin transcript view + access-code controls
 
@@ -111,11 +110,16 @@ FORM_GATE_SECRET=...
 ## Supabase Setup
 
 1. Create a project at [supabase.com/dashboard](https://supabase.com/dashboard).
-2. Apply the schema in `supabase/migrations/20260524100000_initial.sql` (paste it into the SQL editor, or `supabase db push` if you've linked the CLI).
-3. **Authentication → URL Configuration**:
-   - Site URL: `http://localhost:3000` (dev) or `https://forms.winlab.tw` (prod)
-   - Redirect URLs allowlist: add `${SITE_URL}/auth/callback` for each env.
-4. Grab `Project URL`, `publishable_key`, `secret_key` from **Project Settings → API**.
+2. Apply the migrations under `supabase/migrations/` (paste each into the SQL editor in order, or `supabase db push` if you've linked the CLI).
+3. **Authentication → Sign In / Up**: turn **Allow new users to sign up** OFF. Admin users are provisioned via the script below — leaving signups on lets anyone create a Supabase user, even if our app rejects them.
+4. Grab `Project URL`, `publishable_key`, `secret_key` from **Project Settings → API** and put them in `.env.local`.
+5. Provision the first admin user:
+
+   ```bash
+   ADMIN_PASSWORD='paste-the-generated-password' bun run provision-admin
+   ```
+
+   The script reads the target email from `ADMIN_EMAILS` (first entry), refuses any email not in the allowlist, and rejects passwords shorter than 16 characters. Re-running it for the same email resets the password.
 
 ## Deploy
 
@@ -128,16 +132,16 @@ vercel --prod
 
 Production checklist:
 
-- Add the prod redirect URL to Supabase Auth → URL Configuration.
-- Bump `Site URL` accordingly (or keep dev + prod both in the allowlist).
+- Confirm **Allow new users to sign up** is OFF on the prod Supabase project.
 - Set all env vars in Vercel project settings — none with `NEXT_PUBLIC_` prefix should contain secrets.
+- Run `bun run provision-admin` against the prod project once to seed the admin user (point `.env.local` at the prod Supabase URL + secret_key just for that run, then revert).
 
 ## Customization
 
 - **Prompt** — `lib/ai/prompt.ts`. Phase checklists and tone live here.
 - **Tools** — `lib/ai/tools.ts`. Phase-advance and form-complete schemas.
 - **Model** — `OPENAI_MODEL` env var.
-- **Allowlist** — `ADMIN_EMAILS` env var.
+- **Allowlist** — `ADMIN_EMAILS` env var. Adding an email here doesn't create a Supabase user — also run `bun run provision-admin <email>` to set the password.
 - **Rate-limit** — `MAX_ATTEMPTS_PER_WINDOW` / `WINDOW_SECONDS` in `app/api/form/[id]/verify/route.ts`.
 - **Phase set** — schema check constraint + `lib/db.ts` `PHASES` array + prompt. Change in all three if you add/remove phases.
 
