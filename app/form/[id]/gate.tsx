@@ -1,6 +1,5 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -14,7 +13,6 @@ import {
   InputOTPSeparator,
   InputOTPSlot,
 } from "@/components/ui/input-otp";
-import { Label } from "@/components/ui/label";
 import { REGEXP_ONLY_DIGITS } from "input-otp";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -42,15 +40,15 @@ export function Gate({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function verify(value: string) {
+    if (pending) return;
     setError(null);
     setPending(true);
     try {
       const res = await fetch(`/api/form/${formId}/verify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code }),
+        body: JSON.stringify({ code: value }),
       });
       if (res.ok) {
         // Re-fetch the server component; the now-valid gate cookie will let
@@ -61,8 +59,10 @@ export function Gate({
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       const code_ = body.error ?? `error-${res.status}`;
       setError(ERROR_MESSAGES[code_] ?? code_);
+      setCode("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setCode("");
     } finally {
       setPending(false);
     }
@@ -70,46 +70,41 @@ export function Gate({
 
   return (
     <main className="flex min-h-svh items-center justify-center p-6">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
+      <Card className="w-full max-w-sm ring-0">
+        <CardHeader className="text-center">
           <CardTitle>{department}</CardTitle>
           <CardDescription>輸入通行碼進入訪談</CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={onSubmit} className="grid gap-4">
-            <div className="grid justify-items-center gap-2">
-              <Label htmlFor="code">6 碼通行碼</Label>
-              <InputOTP
-                id="code"
-                maxLength={6}
-                pattern={REGEXP_ONLY_DIGITS}
-                inputMode="numeric"
-                autoFocus
-                value={code}
-                onChange={setCode}
-              >
-                <InputOTPGroup>
-                  <InputOTPSlot index={0} />
-                  <InputOTPSlot index={1} />
-                  <InputOTPSlot index={2} />
-                </InputOTPGroup>
-                <InputOTPSeparator />
-                <InputOTPGroup>
-                  <InputOTPSlot index={3} />
-                  <InputOTPSlot index={4} />
-                  <InputOTPSlot index={5} />
-                </InputOTPGroup>
-              </InputOTP>
-            </div>
+          <div className="grid justify-items-center gap-3">
+            <InputOTP
+              maxLength={6}
+              pattern={REGEXP_ONLY_DIGITS}
+              inputMode="numeric"
+              autoFocus
+              disabled={pending}
+              value={code}
+              onChange={setCode}
+              onComplete={verify}
+            >
+              <InputOTPGroup>
+                <InputOTPSlot index={0} />
+                <InputOTPSlot index={1} />
+                <InputOTPSlot index={2} />
+              </InputOTPGroup>
+              <InputOTPSeparator />
+              <InputOTPGroup>
+                <InputOTPSlot index={3} />
+                <InputOTPSlot index={4} />
+                <InputOTPSlot index={5} />
+              </InputOTPGroup>
+            </InputOTP>
             {error && (
               <p className="text-destructive text-sm" role="alert">
                 {error}
               </p>
             )}
-            <Button type="submit" disabled={pending || code.length !== 6}>
-              {pending ? "驗證中…" : "進入"}
-            </Button>
-          </form>
+          </div>
         </CardContent>
       </Card>
     </main>
