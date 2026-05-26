@@ -8,8 +8,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import {
+  InputOTP,
+  InputOTPGroup,
+  InputOTPSeparator,
+  InputOTPSlot,
+} from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
+import { REGEXP_ONLY_DIGITS } from "input-otp";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -71,18 +77,29 @@ export function Gate({
         </CardHeader>
         <CardContent>
           <form onSubmit={onSubmit} className="grid gap-4">
-            <div className="grid gap-2">
+            <div className="grid justify-items-center gap-2">
               <Label htmlFor="code">6 碼通行碼</Label>
-              <Input
+              <InputOTP
                 id="code"
-                inputMode="numeric"
-                pattern="[0-9]{6}"
                 maxLength={6}
+                pattern={REGEXP_ONLY_DIGITS}
+                inputMode="numeric"
                 autoFocus
                 value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-                className="text-center font-mono text-lg tracking-[0.4em]"
-              />
+                onChange={setCode}
+              >
+                <InputOTPGroup>
+                  <InputOTPSlot index={0} />
+                  <InputOTPSlot index={1} />
+                  <InputOTPSlot index={2} />
+                </InputOTPGroup>
+                <InputOTPSeparator />
+                <InputOTPGroup>
+                  <InputOTPSlot index={3} />
+                  <InputOTPSlot index={4} />
+                  <InputOTPSlot index={5} />
+                </InputOTPGroup>
+              </InputOTP>
             </div>
             {error && (
               <p className="text-destructive text-sm" role="alert">
