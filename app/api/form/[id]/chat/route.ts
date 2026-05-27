@@ -382,6 +382,10 @@ export async function POST(
             ...toolResults,
           ];
           allowTools = false;
+          // Tell the client to close this transition bubble and open a fresh
+          // one for the follow-up question, matching how the two persisted
+          // messages render on reload.
+          send({ type: "split" });
           continue;
         }
 
