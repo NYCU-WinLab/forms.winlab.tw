@@ -329,7 +329,10 @@ export function Chat({
               訪談已結束，感謝你撥空。
             </p>
           ) : (
-            <form onSubmit={onSend} className="flex items-end gap-2">
+            <form
+              onSubmit={onSend}
+              className="border-input bg-background focus-within:border-ring focus-within:ring-ring/50 relative flex flex-col rounded-2xl border shadow-sm transition-colors focus-within:ring-3"
+            >
               <Textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -350,7 +353,7 @@ export function Chat({
                 rows={1}
                 placeholder="輸入回覆…"
                 disabled={streaming || !!editingId}
-                className="max-h-40 min-h-10 resize-none"
+                className="max-h-40 min-h-11 resize-none border-0 bg-transparent py-2.5 pr-12 shadow-none focus-visible:border-0 focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent"
                 aria-label="回覆內容"
               />
               <Button
@@ -358,6 +361,7 @@ export function Chat({
                 size="icon"
                 disabled={streaming || !!editingId || !input.trim()}
                 aria-label="送出"
+                className="absolute right-2 bottom-2 size-8 rounded-full"
               >
                 <ArrowUp className="size-4" />
               </Button>
