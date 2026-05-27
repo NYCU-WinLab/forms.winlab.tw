@@ -1,17 +1,10 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  PHASES,
-  PHASE_LABEL_SHORT,
-  type FormRow,
-  type MessageRow,
-  type Phase,
-} from "@/lib/db";
+import { type FormRow, type MessageRow, type Phase } from "@/lib/db";
 import { cn } from "@/lib/utils";
-import { Pencil } from "lucide-react";
+import { ArrowUp, Pencil } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
@@ -284,44 +277,15 @@ export function Chat({
   }
 
   return (
-    <div className="flex h-svh flex-col">
-      <header className="border-b">
-        <div className="mx-auto flex max-w-3xl flex-col gap-2 p-4">
-          <div className="flex items-center justify-between gap-2">
-            <div>
-              <p className="text-muted-foreground text-xs">
-                {form.organization}
-                {form.unit ? ` / ${form.unit}` : ""}
-              </p>
-              <h1 className="font-semibold">{form.department}</h1>
-            </div>
-            {status === "completed" && <Badge variant="secondary">已結束</Badge>}
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {PHASES.map((p) => (
-              <Badge
-                key={p}
-                variant={p === phase ? "default" : "outline"}
-                className={cn(
-                  "text-[10px]",
-                  p === phase ? "" : "text-muted-foreground",
-                )}
-              >
-                {PHASE_LABEL_SHORT[p]}
-              </Badge>
-            ))}
-          </div>
-        </div>
-      </header>
-
+    <div className="relative h-svh">
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto"
+        className="h-full overflow-y-auto"
         role="log"
         aria-live="polite"
         aria-busy={streaming}
       >
-        <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4">
+        <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4 pb-36">
           {messages.map((m) =>
             editingId === m.id ? (
               <EditingBubble
@@ -357,8 +321,9 @@ export function Chat({
         </div>
       </div>
 
-      <footer className="bg-background border-t">
-        <div className="mx-auto max-w-3xl p-4">
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 pt-20">
+        <ProgressiveBlur />
+        <div className="pointer-events-auto relative mx-auto max-w-3xl px-4 pb-4">
           {status === "completed" ? (
             <p className="text-muted-foreground text-center text-sm">
               訪談已結束，感謝你撥空。
@@ -382,22 +347,57 @@ export function Chat({
                   e.preventDefault();
                   void onSend(e as unknown as React.FormEvent);
                 }}
-                rows={2}
-                placeholder="輸入回覆… (Enter 送出，Shift+Enter 換行)"
+                rows={1}
+                placeholder="輸入回覆…"
                 disabled={streaming || !!editingId}
-                className="resize-none"
+                className="max-h-40 min-h-10 resize-none"
                 aria-label="回覆內容"
               />
               <Button
                 type="submit"
+                size="icon"
                 disabled={streaming || !!editingId || !input.trim()}
+                aria-label="送出"
               >
-                送出
+                <ArrowUp className="size-4" />
               </Button>
             </form>
           )}
         </div>
-      </footer>
+      </div>
+    </div>
+  );
+}
+
+// Progressive blur: stacked backdrop-filter layers, each masked with a
+// linear-gradient. Strongest blur sits at the bottom and fades out fastest
+// going up, so cumulatively the effect sharpens toward the top while a
+// background gradient keeps the input area legible.
+function ProgressiveBlur() {
+  const layers = [
+    { blur: 4, to: "30%" },
+    { blur: 2, to: "55%" },
+    { blur: 1, to: "80%" },
+    { blur: 0.5, to: "100%" },
+  ];
+  return (
+    <div className="pointer-events-none absolute inset-0" aria-hidden>
+      {layers.map((l) => {
+        const mask = `linear-gradient(to top, rgba(0,0,0,1) 0%, rgba(0,0,0,0) ${l.to})`;
+        return (
+          <div
+            key={l.blur}
+            className="absolute inset-0"
+            style={{
+              backdropFilter: `blur(${l.blur}px)`,
+              WebkitBackdropFilter: `blur(${l.blur}px)`,
+              maskImage: mask,
+              WebkitMaskImage: mask,
+            }}
+          />
+        );
+      })}
+      <div className="from-background via-background/80 absolute inset-0 bg-gradient-to-t to-transparent" />
     </div>
   );
 }
