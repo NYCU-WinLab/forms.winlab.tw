@@ -331,37 +331,44 @@ export function Chat({
           ) : (
             <form
               onSubmit={onSend}
-              className="border-input bg-background focus-within:border-ring focus-within:ring-ring/50 relative flex flex-col rounded-2xl border shadow-sm transition-colors focus-within:ring-3"
+              className="border-input bg-background focus-within:border-ring focus-within:ring-ring/50 flex items-end gap-2 rounded-2xl border px-3 py-2 shadow-sm transition-colors focus-within:ring-3"
             >
-              <Textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onCompositionStart={() => setIsComposing(true)}
-                onCompositionEnd={() => {
-                  setIsComposing(false);
-                  compositionEndedAt.current = Date.now();
-                }}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter" || e.shiftKey) return;
-                  if (isComposing) return;
-                  if (e.nativeEvent.isComposing) return;
-                  if (e.keyCode === 229) return;
-                  if (Date.now() - compositionEndedAt.current < 50) return;
-                  e.preventDefault();
-                  void onSend(e as unknown as React.FormEvent);
-                }}
-                rows={1}
-                placeholder="輸入回覆…"
-                disabled={streaming || !!editingId}
-                className="max-h-40 min-h-12 resize-none border-0 bg-transparent py-3 pr-12 shadow-none focus-visible:border-0 focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent"
-                aria-label="回覆內容"
-              />
+              <div className="relative flex-1">
+                {!input && (
+                  <div className="text-muted-foreground pointer-events-none absolute inset-0 flex items-center text-base md:text-sm">
+                    輸入回覆
+                    <AnimatedDots />
+                  </div>
+                )}
+                <Textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onCompositionStart={() => setIsComposing(true)}
+                  onCompositionEnd={() => {
+                    setIsComposing(false);
+                    compositionEndedAt.current = Date.now();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" || e.shiftKey) return;
+                    if (isComposing) return;
+                    if (e.nativeEvent.isComposing) return;
+                    if (e.keyCode === 229) return;
+                    if (Date.now() - compositionEndedAt.current < 50) return;
+                    e.preventDefault();
+                    void onSend(e as unknown as React.FormEvent);
+                  }}
+                  rows={1}
+                  disabled={streaming || !!editingId}
+                  className="block max-h-40 min-h-0 w-full resize-none border-0 bg-transparent px-0 py-1.5 shadow-none focus-visible:border-0 focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent"
+                  aria-label="回覆內容"
+                />
+              </div>
               <Button
                 type="submit"
                 size="icon"
                 disabled={streaming || !!editingId || !input.trim()}
                 aria-label="送出"
-                className="absolute right-2 bottom-2 size-8 rounded-full"
+                className="size-8 shrink-0 rounded-full"
               >
                 <ArrowUp className="size-4" />
               </Button>
@@ -406,6 +413,18 @@ function ProgressiveBlur() {
   );
 }
 
+// Cycles 1→2→3 trailing dots. Fixed width so neighbouring text doesn't shift.
+function AnimatedDots() {
+  const [n, setN] = useState(1);
+  useEffect(() => {
+    const t = setInterval(() => setN((x) => (x % 3) + 1), 450);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <span className="inline-block w-[1.25em] text-left">{".".repeat(n)}</span>
+  );
+}
+
 const THINKING_VERBS = ["思考中", "理解中", "消化問題", "整理脈絡", "推敲中"];
 
 // Cycles a verb while the assistant turn is still empty, so the wait reads as
@@ -422,7 +441,7 @@ function ThinkingIndicator() {
   return (
     <span className="text-muted-foreground inline-flex items-center">
       {THINKING_VERBS[i]}
-      <span className="animate-pulse">…</span>
+      <AnimatedDots />
     </span>
   );
 }
