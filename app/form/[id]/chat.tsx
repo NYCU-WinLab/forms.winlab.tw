@@ -425,7 +425,14 @@ function AnimatedDots() {
   );
 }
 
-const THINKING_VERBS = ["思考中", "理解中", "消化問題", "整理脈絡", "推敲中"];
+const THINKING_VERBS = [
+  "思考中",
+  "釐清中",
+  "拆解問題",
+  "爬梳脈絡",
+  "歸納重點",
+  "琢磨中",
+];
 
 // Cycles a verb while the assistant turn is still empty, so the wait reads as
 // active rather than a frozen ellipsis.
