@@ -147,22 +147,18 @@ export async function POST(
   const openaiMessages = toOpenAIMessages(form, recentMessages);
 
   const openai = getOpenAI();
-  const runner = openai.chat.completions.stream({
-    model: MODEL,
-    messages: openaiMessages,
-    tools,
-    tool_choice: "auto",
-    max_completion_tokens: MAX_COMPLETION_TOKENS,
-  });
-
-  // Accumulate content for partial-flush recovery if the run is aborted.
-  let contentBuf = "";
-  runner.on("content", (delta) => {
-    contentBuf += delta;
-  });
-
   const encoder = new TextEncoder();
-  const expectedPhase = form.current_phase;
+
+  // Tracked so the ReadableStream's cancel() can abort whichever model call is
+  // currently in flight across the agent loop.
+  let activeRunner: ReturnType<typeof openai.chat.completions.stream> | null =
+    null;
+
+  // Bounds the agent loop. A user turn needs at most two model calls: the first
+  // (tools enabled) may advance the phase; the second (tools disabled) asks the
+  // new phase's opening question so the conversation doesn't dead-end on the
+  // transition sentence. The extra slot is pure paranoia against runaway.
+  const MAX_MODEL_CALLS = 3;
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -188,10 +184,70 @@ export async function POST(
         }
       };
 
-      runner.on("content", (delta) => send({ type: "text", delta }));
+      // Interview state threaded across loop iterations. `livePhase` tracks the
+      // phase after applied advances; `expectedPhase` is the optimistic-lock
+      // expectation handed to chat_persist_turn each round.
+      let workingMessages: ChatMessageParam[] = openaiMessages;
+      let livePhase: Phase = form.current_phase;
+      let expectedPhase: Phase = form.current_phase;
+      const summaries: Partial<Record<Phase, string>> = {
+        ...form.phase_summaries,
+      };
+      // First call lets the model drive phase transitions; continuation calls
+      // disable tools so the model can only produce the next question (no
+      // chain-advance, no second dead-end).
+      let allowTools = true;
 
-      try {
-        const final = await runner.finalChatCompletion();
+      for (let call = 0; call < MAX_MODEL_CALLS; call++) {
+        const runner = openai.chat.completions.stream({
+          model: MODEL,
+          messages: workingMessages,
+          tools,
+          tool_choice: allowTools ? "auto" : "none",
+          max_completion_tokens: MAX_COMPLETION_TOKENS,
+        });
+        activeRunner = runner;
+
+        // Accumulate content for partial-flush recovery if the run is aborted.
+        let contentBuf = "";
+        runner.on("content", (delta) => {
+          contentBuf += delta;
+          send({ type: "text", delta });
+        });
+
+        let final;
+        try {
+          final = await runner.finalChatCompletion();
+        } catch (e) {
+          // Common reject paths:
+          //   • User abort     — `runner.aborted` is true. Persist what we have.
+          //   • OpenAI 429/5xx — SDK already retried via maxRetries.
+          //   • Network blip   — persist partial, surface friendly.
+          const aborted = runner.aborted;
+          if (contentBuf.length > 0) {
+            const { error: partialErr } = await admin.rpc("chat_persist_turn", {
+              p_form_id: formId,
+              p_expected_phase: expectedPhase,
+              p_content: contentBuf,
+              p_phase: livePhase,
+              p_tool_calls: null,
+              p_incomplete: true,
+              p_new_phase: null,
+              p_summary_for_old_phase: null,
+              p_complete: false,
+            });
+            if (partialErr) {
+              logServerError("chat.partial_persist", partialErr, { formId });
+            }
+          }
+          if (!aborted) {
+            logServerError("chat.stream", e, { formId });
+            send({ type: "error", code: ErrorCode.UpstreamError });
+          }
+          close();
+          return;
+        }
+
         const msg = final.choices[0]?.message;
         const rawToolCalls = (msg?.tool_calls ?? []) as ReadonlyArray<{
           type?: string;
@@ -201,7 +257,7 @@ export async function POST(
         );
 
         // Validate tool calls against the server-side transition machine.
-        let newPhase: Phase = form.current_phase;
+        let newPhase: Phase = livePhase;
         let summaryForOldPhase: string | null = null;
         let completed = false;
 
@@ -215,10 +271,10 @@ export async function POST(
               });
               continue;
             }
-            if (!isValidAdvance(form.current_phase, args.to_phase)) {
+            if (!isValidAdvance(livePhase, args.to_phase)) {
               logServerError("chat.bad_advance_target", null, {
                 formId,
-                from: form.current_phase,
+                from: livePhase,
                 to: args.to_phase,
               });
               continue;
@@ -234,16 +290,18 @@ export async function POST(
               });
               continue;
             }
-            if (form.current_phase !== "wrapup") {
+            if (livePhase !== "wrapup") {
               logServerError("chat.complete_out_of_phase", null, {
                 formId,
-                phase: form.current_phase,
+                phase: livePhase,
               });
               continue;
             }
             completed = true;
           }
         }
+
+        const advanced = newPhase !== livePhase;
 
         // Persist assistant turn atomically with the phase advance under an
         // advisory lock. If the phase changed since we read it (another tab),
@@ -253,9 +311,11 @@ export async function POST(
           p_expected_phase: expectedPhase,
           p_content: msg?.content ?? "",
           p_phase: newPhase,
-          p_tool_calls: toolCalls.length ? (toolCalls as unknown as object) : null,
+          p_tool_calls: toolCalls.length
+            ? (toolCalls as unknown as object)
+            : null,
           p_incomplete: false,
-          p_new_phase: newPhase !== form.current_phase ? newPhase : null,
+          p_new_phase: advanced ? newPhase : null,
           p_summary_for_old_phase: summaryForOldPhase,
           p_complete: completed,
         });
@@ -285,43 +345,55 @@ export async function POST(
           return;
         }
 
-        if (newPhase !== form.current_phase) {
+        if (advanced) {
           send({ type: "phase", to: newPhase });
+          if (summaryForOldPhase) summaries[livePhase] = summaryForOldPhase;
+          livePhase = newPhase;
+          expectedPhase = newPhase;
         }
-        if (completed) send({ type: "completed" });
-        send({ type: "done" });
-        close();
-      } catch (e) {
-        // Common reject paths:
-        //   • User abort     — `runner.aborted` is true. Persist what we have.
-        //   • OpenAI 429/5xx — SDK already retried via maxRetries; surface friendly.
-        //   • Network blip   — persist partial, surface friendly.
-        const aborted = runner.aborted;
-        if (contentBuf.length > 0) {
-          const { error: partialErr } = await admin.rpc("chat_persist_turn", {
-            p_form_id: formId,
-            p_expected_phase: expectedPhase,
-            p_content: contentBuf,
-            p_phase: form.current_phase,
-            p_tool_calls: null,
-            p_incomplete: true,
-            p_new_phase: null,
-            p_summary_for_old_phase: null,
-            p_complete: false,
+        if (completed) {
+          send({ type: "completed" });
+          break;
+        }
+
+        // After an advance, loop once more (tools off) so the model asks the
+        // new phase's opening question instead of stopping on the transition.
+        if (advanced) {
+          const refreshed = buildSystemPrompt({
+            ...form,
+            current_phase: livePhase,
+            phase_summaries: summaries,
           });
-          if (partialErr) {
-            logServerError("chat.partial_persist", partialErr, { formId });
-          }
+          const assistantMsg: ChatMessageParam = {
+            role: "assistant",
+            content: msg?.content || null,
+            tool_calls: toolCalls,
+          };
+          const toolResults: ChatMessageParam[] = toolCalls.map((tc) => ({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: "applied",
+          }));
+          workingMessages = [
+            { role: "system", content: refreshed.stable },
+            { role: "system", content: refreshed.dynamic },
+            ...workingMessages.slice(2),
+            assistantMsg,
+            ...toolResults,
+          ];
+          allowTools = false;
+          continue;
         }
-        if (!aborted) {
-          logServerError("chat.stream", e, { formId });
-          send({ type: "error", code: ErrorCode.UpstreamError });
-        }
-        close();
+
+        // Plain Q&A turn (or the post-advance question) — nothing more to do.
+        break;
       }
+
+      send({ type: "done" });
+      close();
     },
     cancel() {
-      runner.abort();
+      activeRunner?.abort();
     },
   });
 
