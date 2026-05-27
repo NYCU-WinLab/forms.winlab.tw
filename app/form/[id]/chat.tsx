@@ -353,7 +353,7 @@ export function Chat({
                 rows={1}
                 placeholder="輸入回覆…"
                 disabled={streaming || !!editingId}
-                className="max-h-40 min-h-11 resize-none border-0 bg-transparent py-2.5 pr-12 shadow-none focus-visible:border-0 focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent"
+                className="max-h-40 min-h-12 resize-none border-0 bg-transparent py-3 pr-12 shadow-none focus-visible:border-0 focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent"
                 aria-label="回覆內容"
               />
               <Button
@@ -406,6 +406,27 @@ function ProgressiveBlur() {
   );
 }
 
+const THINKING_VERBS = ["思考中", "理解中", "消化問題", "整理脈絡", "推敲中"];
+
+// Cycles a verb while the assistant turn is still empty, so the wait reads as
+// active rather than a frozen ellipsis.
+function ThinkingIndicator() {
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    const t = setInterval(
+      () => setI((n) => (n + 1) % THINKING_VERBS.length),
+      1800,
+    );
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <span className="text-muted-foreground inline-flex items-center">
+      {THINKING_VERBS[i]}
+      <span className="animate-pulse">…</span>
+    </span>
+  );
+}
+
 function MessageBubble({
   message,
   canEdit,
@@ -442,7 +463,11 @@ function MessageBubble({
         )}
         aria-busy={message.streaming || undefined}
       >
-        {message.content || (message.streaming ? "…" : "")}
+        {message.content ? (
+          message.content
+        ) : message.streaming ? (
+          <ThinkingIndicator />
+        ) : null}
         {message.incomplete && (
           <span className="text-muted-foreground mt-1 block text-[10px]">
             （訊息中斷，請繼續對話）
