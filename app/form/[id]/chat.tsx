@@ -27,6 +27,7 @@ type FormHead = Pick<
 type StreamEvent =
   | { type: "text"; delta: string }
   | { type: "phase"; to: Phase }
+  | { type: "split" }
   | { type: "completed" }
   | { type: "done" }
   | { type: "error"; code?: string; message?: string };
@@ -128,6 +129,13 @@ export function Chat({
     }
 
     const placeholderId = `streaming-${Date.now()}`;
+    // Active streaming bubble. The server emits "split" between the phase-
+    // transition turn and the follow-up question; we finalize the current
+    // bubble and open a fresh one so each lands separately, matching reload.
+    // currentContent lets us decide without reading state mid-stream.
+    let currentId = placeholderId;
+    let currentContent = "";
+    let splitN = 0;
     setMessages((m) => [
       ...m,
       {
@@ -179,13 +187,35 @@ export function Chat({
           }
 
           if (event.type === "text") {
+            currentContent += event.delta;
             setMessages((m) =>
               m.map((x) =>
-                x.id === placeholderId
+                x.id === currentId
                   ? { ...x, content: x.content + event.delta }
                   : x,
               ),
             );
+          } else if (event.type === "split") {
+            // Empty current bubble (model advanced without a transition line)
+            // → reuse it instead of leaving an empty pill.
+            if (currentContent.length > 0) {
+              const prevId = currentId;
+              const newId = `streaming-${Date.now()}-${++splitN}`;
+              currentId = newId;
+              currentContent = "";
+              setMessages((m) => [
+                ...m.map((x) =>
+                  x.id === prevId ? { ...x, streaming: false } : x,
+                ),
+                {
+                  id: newId,
+                  role: "assistant",
+                  content: "",
+                  phase,
+                  streaming: true,
+                },
+              ]);
+            }
           } else if (event.type === "phase") {
             setPhase(event.to);
           } else if (event.type === "completed") {
@@ -200,8 +230,14 @@ export function Chat({
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (abortRef.current === ac) abortRef.current = null;
+      // Finalize the active bubble; drop it if it never received any content
+      // (e.g. error before first token) so no empty pill lingers.
       setMessages((m) =>
-        m.map((x) => (x.id === placeholderId ? { ...x, streaming: false } : x)),
+        currentContent.length === 0
+          ? m.filter((x) => x.id !== currentId)
+          : m.map((x) =>
+              x.id === currentId ? { ...x, streaming: false } : x,
+            ),
       );
       setStreaming(false);
     }
