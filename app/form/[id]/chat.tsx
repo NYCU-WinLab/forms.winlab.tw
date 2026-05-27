@@ -285,7 +285,7 @@ export function Chat({
         aria-live="polite"
         aria-busy={streaming}
       >
-        <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4 pb-36">
+        <div className="mx-auto flex max-w-3xl flex-col gap-4 px-4 pt-20 pb-36">
           {messages.map((m) =>
             editingId === m.id ? (
               <EditingBubble
@@ -321,8 +321,12 @@ export function Chat({
         </div>
       </div>
 
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-20">
+        <ProgressiveBlur side="top" />
+      </div>
+
       <div className="pointer-events-none absolute inset-x-0 bottom-0 pt-20">
-        <ProgressiveBlur />
+        <ProgressiveBlur side="bottom" />
         <div className="pointer-events-auto relative mx-auto max-w-3xl px-4 pb-4">
           {status === "completed" ? (
             <p className="text-muted-foreground text-center text-sm">
@@ -384,17 +388,19 @@ export function Chat({
 // linear-gradient. Strongest blur sits at the bottom and fades out fastest
 // going up, so cumulatively the effect sharpens toward the top while a
 // background gradient keeps the input area legible.
-function ProgressiveBlur() {
+function ProgressiveBlur({ side }: { side: "top" | "bottom" }) {
   const layers = [
     { blur: 4, to: "30%" },
     { blur: 2, to: "55%" },
     { blur: 1, to: "80%" },
     { blur: 0.5, to: "100%" },
   ];
+  const dir = side === "bottom" ? "to top" : "to bottom";
+  const bg = side === "bottom" ? "bg-gradient-to-t" : "bg-gradient-to-b";
   return (
     <div className="pointer-events-none absolute inset-0" aria-hidden>
       {layers.map((l) => {
-        const mask = `linear-gradient(to top, rgba(0,0,0,1) 0%, rgba(0,0,0,0) ${l.to})`;
+        const mask = `linear-gradient(${dir}, rgba(0,0,0,1) 0%, rgba(0,0,0,0) ${l.to})`;
         return (
           <div
             key={l.blur}
@@ -408,7 +414,12 @@ function ProgressiveBlur() {
           />
         );
       })}
-      <div className="from-background via-background/80 absolute inset-0 bg-gradient-to-t to-transparent" />
+      <div
+        className={cn(
+          "from-background via-background/80 absolute inset-0 to-transparent",
+          bg,
+        )}
+      />
     </div>
   );
 }
