@@ -116,11 +116,15 @@ export function Chat({
     setStreaming(true);
     setError(null);
 
+    let optimisticUserId: string | null = null;
+    let requestAccepted = false;
     if (userContent) {
+      const localUserId = `local-${Date.now()}`;
+      optimisticUserId = localUserId;
       setMessages((m) => [
         ...m,
         {
-          id: `local-${Date.now()}`,
+          id: localUserId,
           role: "user",
           content: userContent,
           phase,
@@ -163,6 +167,7 @@ export function Chat({
         showError(body.error, `http-${res.status}`);
         return;
       }
+      requestAccepted = true;
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -233,11 +238,12 @@ export function Chat({
       // Finalize the active bubble; drop it if it never received any content
       // (e.g. error before first token) so no empty pill lingers.
       setMessages((m) =>
-        currentContent.length === 0
-          ? m.filter((x) => x.id !== currentId)
-          : m.map((x) =>
-              x.id === currentId ? { ...x, streaming: false } : x,
-            ),
+        m
+          .filter((x) => x.id !== currentId || currentContent.length > 0)
+          .filter((x) => requestAccepted || x.id !== optimisticUserId)
+          .map((x) =>
+            x.id === currentId ? { ...x, streaming: false } : x,
+          ),
       );
       setStreaming(false);
     }
@@ -521,7 +527,7 @@ function MessageBubble({
         <button
           type="button"
           onClick={onEdit}
-          className="text-muted-foreground hover:text-foreground self-center opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100"
+          className="text-muted-foreground/55 hover:text-muted-foreground focus-visible:text-foreground flex size-7 items-center justify-center self-center rounded-full transition-colors"
           aria-label="編輯訊息並重新生成"
         >
           <Pencil className="size-3.5" />

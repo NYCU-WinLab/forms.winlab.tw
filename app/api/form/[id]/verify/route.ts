@@ -1,6 +1,10 @@
 import { clientIP } from "@/lib/auth";
 import { ErrorCode, errorJson, logServerError } from "@/lib/errors";
-import { GATE_COOKIE_TTL_SECONDS, cookieName, signGateToken } from "@/lib/form-gate";
+import {
+  GATE_COOKIE_TTL_SECONDS,
+  cookieName,
+  signGateToken,
+} from "@/lib/form-gate";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { NextResponse, type NextRequest } from "next/server";
 
@@ -33,21 +37,16 @@ export async function POST(
     return errorJson(ErrorCode.InvalidBody, 400);
   }
   const code = String(body.code ?? "").trim();
-  if (!/^[0-9]{6}$/.test(code)) {
-    // Record the failed attempt so brute force still ticks rate-limit even if
-    // the format is wrong (otherwise format-fuzz is free).
-    const admin = createAdminClient();
-    await admin
-      .from("verify_attempts")
-      .insert({ form_id: formId, ip, succeeded: false });
-    return errorJson(ErrorCode.BadCodeFormat, 400);
-  }
+  const badFormat = !/^[0-9]{6}$/.test(code);
 
   const admin = createAdminClient();
   const rpcResult = await admin.rpc("record_verify_attempt", {
     p_form_id: formId,
     p_ip: ip,
-    p_code: code,
+    // Malformed attempts still go through the same atomic rate-limit path.
+    // They cannot match a valid 6-digit code, but they must count toward both
+    // per-IP and per-form limits.
+    p_code: badFormat ? code.slice(0, 64) : code,
   });
   const data = rpcResult.data as AttemptRow[] | null;
 
@@ -57,6 +56,17 @@ export async function POST(
   }
 
   const row = data[0]!;
+  if (badFormat) {
+    switch (row.result) {
+      case "rate_limited":
+        return errorJson(ErrorCode.TooManyAttempts, 429, { retry_after: 60 });
+      case "form_locked":
+        return errorJson(ErrorCode.FormLocked, 429, { retry_after: 3600 });
+      default:
+        return errorJson(ErrorCode.BadCodeFormat, 400);
+    }
+  }
+
   switch (row.result) {
     case "rate_limited":
       return errorJson(ErrorCode.TooManyAttempts, 429, { retry_after: 60 });
