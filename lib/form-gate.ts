@@ -9,6 +9,12 @@ const TTL_SECONDS = 2 * 60 * 60;
 function getSecret() {
   const raw = process.env.FORM_GATE_SECRET;
   if (!raw) throw new Error("FORM_GATE_SECRET not set");
+  // HS256 security rests entirely on this secret's entropy; a short or
+  // guessable value lets an attacker forge a gate token for any form. Require
+  // >= 32 chars (the documented `openssl rand -base64 32` yields 44).
+  if (raw.length < 32) {
+    throw new Error("FORM_GATE_SECRET too weak — require >= 32 chars");
+  }
   return new TextEncoder().encode(raw);
 }
 

@@ -16,13 +16,17 @@ export async function signIn(formData: FormData) {
     redirect("/login?error=invalid-credentials");
   }
 
-  if (!isAllowedAdmin(email)) {
-    redirect("/login?error=invalid-credentials");
-  }
-
+  // Authenticate FIRST, then enforce the allowlist, so response timing doesn't
+  // reveal whether an email is on the allowlist. The previous pre-auth check
+  // returned instantly for non-allowlisted emails — a membership oracle.
   const supabase = await createClient();
   const { error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) {
+    redirect("/login?error=invalid-credentials");
+  }
+
+  if (!isAllowedAdmin(email)) {
+    await supabase.auth.signOut();
     redirect("/login?error=invalid-credentials");
   }
 

@@ -335,6 +335,9 @@ export async function POST(
 
         if (persistResult.error || !persist || persist.length === 0) {
           logServerError("chat.persist_rpc", persistResult.error, { formId });
+          // The assistant turn was NOT stored — tell the client to drop the
+          // streamed bubble so it doesn't linger as a phantom message.
+          send({ type: "discard" });
           send({ type: "error", code: ErrorCode.DbError });
           close();
           return;
@@ -342,16 +345,20 @@ export async function POST(
 
         const row = persist[0]!;
         if (row.result === "phase_changed") {
+          // Client refreshes from the server snapshot, which already drops the
+          // un-persisted bubble — no explicit discard needed.
           send({ type: "error", code: ErrorCode.PhaseChanged });
           close();
           return;
         }
         if (row.result === "form_completed") {
+          send({ type: "discard" });
           send({ type: "error", code: ErrorCode.FormCompleted });
           close();
           return;
         }
         if (row.result !== "ok") {
+          send({ type: "discard" });
           send({ type: "error", code: ErrorCode.DbError });
           close();
           return;
