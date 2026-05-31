@@ -30,6 +30,7 @@ type StreamEvent =
   | { type: "split" }
   | { type: "completed" }
   | { type: "done" }
+  | { type: "discard" }
   | { type: "error"; code?: string; message?: string };
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -41,6 +42,13 @@ const ERROR_MESSAGES: Record<string, string> = {
   "upstream-error": "AI 暫時忙線，稍後再試",
   "db-error": "系統錯誤，稍後再試",
   "stream-error": "連線中斷，稍後再試",
+  "bad-request": "請求無效，請重新整理頁面再試",
+  "not-found": "找不到表單",
+  "invalid-target": "找不到要編輯的訊息，請重新整理",
+  "already-deleted": "這則訊息已被更新，請重新整理",
+  "invalid-body": "請求格式錯誤",
+  "missing-fields": "缺少必要欄位",
+  forbidden: "沒有權限",
 };
 
 export function Chat({
@@ -225,6 +233,13 @@ export function Chat({
             setPhase(event.to);
           } else if (event.type === "completed") {
             setStatus("completed");
+          } else if (event.type === "discard") {
+            // Server couldn't persist this assistant turn; drop the streamed
+            // bubble so it doesn't linger as a phantom message (the user turn
+            // before it was already persisted, so leave that intact).
+            const orphan = currentId;
+            currentContent = "";
+            setMessages((m) => m.filter((x) => x.id !== orphan));
           } else if (event.type === "error") {
             showError(event.code, event.message ?? "stream-error");
           }
