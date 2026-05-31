@@ -95,7 +95,8 @@ export async function regenerateAccessCode(formId: string) {
     .maybeSingle();
   if (lookupErr) throw new Error(lookupErr.message);
   if (!form) throw new Error("not-found");
-  if (form.owner_id && form.owner_id !== actor.userId) {
+  // Fail-closed: a NULL owner_id is treated as "not yours", never open to all.
+  if (!form.owner_id || form.owner_id !== actor.userId) {
     throw new Error("forbidden");
   }
 
@@ -130,7 +131,8 @@ export async function closeForm(formId: string) {
     .maybeSingle();
   if (lookupErr) throw new Error(lookupErr.message);
   if (!form) throw new Error("not-found");
-  if (form.owner_id && form.owner_id !== actor.userId) {
+  // Fail-closed: a NULL owner_id is treated as "not yours", never open to all.
+  if (!form.owner_id || form.owner_id !== actor.userId) {
     throw new Error("forbidden");
   }
 
