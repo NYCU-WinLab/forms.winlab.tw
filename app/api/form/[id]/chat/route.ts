@@ -68,21 +68,46 @@ export async function POST(
     return errorJson(ErrorCode.FormCompleted, 410);
   }
 
-  // Parse + validate user message.
+  // Parse + validate user message. An empty body is the one-shot greeting seed
+  // (see app/form/[id]/page.tsx `shouldSeed`); a non-empty body is a user turn.
   let body: { content?: string } = {};
   try {
     body = await request.json();
   } catch {
-    // Empty body is allowed — used for the initial assistant greeting.
+    // Empty/invalid body is treated as the greeting seed and gated below.
   }
   const content = String(body.content ?? "").trim();
   if (content.length > MAX_CONTENT) {
     return errorJson(ErrorCode.ContentTooLong, 413, { max: MAX_CONTENT });
   }
 
-  // Per-form rate-limit (covers the case where someone obtains a gate cookie
-  // and scripts the chat endpoint). Counts non-deleted user messages.
-  if (content) {
+  // Total non-deleted messages — backs both the hard cap and the greeting
+  // one-shot guard. Computed for EVERY request (not just user turns): an
+  // empty-body POST must not be able to skip rate-limiting and loop the paid
+  // model with no bound on calls or transcript growth.
+  const { count: total, error: capErr } = await admin
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("form_id", formId)
+    .is("deleted_at", null);
+  if (capErr) {
+    logServerError("chat.cap_check", capErr, { formId });
+    return errorJson(ErrorCode.DbError, 500);
+  }
+  if ((total ?? 0) >= MESSAGES_HARD_CAP) {
+    return errorJson(ErrorCode.ChatRateLimited, 429);
+  }
+
+  if (!content) {
+    // The greeting seed is valid exactly once, when the transcript is empty.
+    // Any later empty-body POST is a scripted attempt to drive free model
+    // calls — reject it so the only no-content model call is the first greeting.
+    if ((total ?? 0) > 0) {
+      return errorJson(ErrorCode.BadRequest, 400);
+    }
+  } else {
+    // Per-form rate-limit on user turns (covers a leaked gate cookie scripting
+    // the endpoint). Counts non-deleted user messages in the window.
     const windowStart = new Date(
       Date.now() - CHAT_WINDOW_SECONDS * 1000,
     ).toISOString();
@@ -101,19 +126,6 @@ export async function POST(
       return errorJson(ErrorCode.ChatRateLimited, 429, {
         retry_after: CHAT_WINDOW_SECONDS,
       });
-    }
-
-    const { count: total, error: capErr } = await admin
-      .from("messages")
-      .select("id", { count: "exact", head: true })
-      .eq("form_id", formId)
-      .is("deleted_at", null);
-    if (capErr) {
-      logServerError("chat.cap_check", capErr, { formId });
-      return errorJson(ErrorCode.DbError, 500);
-    }
-    if ((total ?? 0) >= MESSAGES_HARD_CAP) {
-      return errorJson(ErrorCode.ChatRateLimited, 429);
     }
 
     const { error: insertErr } = await admin.from("messages").insert({

@@ -43,9 +43,11 @@ export default async function FormDetailPage({
   if (!formData) notFound();
   const form = formData as FormRow;
 
-  // Owner gate. Treat foreign forms as not-found (don't leak existence /
-  // access_code via different error messages).
-  if (form.owner_id && form.owner_id !== user!.id) notFound();
+  // Owner gate, fail-closed: a NULL owner_id (orphaned / pre-migration / admin
+  // deleted via `on delete set null`) is treated as "not yours" rather than
+  // open to everyone. Treat foreign/orphaned forms as not-found so we don't
+  // leak existence / access_code via different error messages.
+  if (!form.owner_id || form.owner_id !== user!.id) notFound();
 
   const { data: msgRows } = await admin
     .from("messages")
